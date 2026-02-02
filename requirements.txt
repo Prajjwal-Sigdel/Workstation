@@ -1,1 +1,4 @@
 opencv-python
+numpy
+face-recognition
+face-recognition-models==0.3.0

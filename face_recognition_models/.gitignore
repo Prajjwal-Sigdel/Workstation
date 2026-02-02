@@ -1,0 +1,17 @@
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Compiled Python files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Model files (these are large and will be downloaded)
+models/*.dat
+models/*.bz2
+
+# Development files
+.pytest_cache/
+.coverage
