@@ -1,261 +1,227 @@
-# Sleep Checker v1.0
+# Sleep Checker
 
-**Intelligent Sleep Prevention System for Linux**
+A face recognition-based system daemon for Linux that monitors user presence before system sleep events. The daemon analyzes webcam input to make intelligent decisions about whether to allow sleep, prevent sleep, or shutdown the system.
 
-A computer vision-based system that prevents unwanted sleep interruptions during reading sessions by monitoring user presence through facial recognition.
+## Overview
 
-## Table of Contents
-- [Problem Statement](#problem-statement)
-- [Solution Overview](#solution-overview)
-- [Technologies Used](#technologies-used)
-- [Project Structure](#project-structure)
-- [Installation](#installation)
-- [Usage](#usage)
-- [How It Works](#how-it-works)
-- [Development Phases](#development-phases)
-- [Performance](#performance)
-- [Future Enhancements](#future-enhancements)
-- [References](#references)
-- [License](#license)
+Sleep Checker intercepts system sleep events and uses facial recognition to determine the appropriate action:
 
-## Problem Statement
+| Detection Result | Action |
+|------------------|--------|
+| Owner detected | Block sleep (user is present) |
+| Unknown person detected | Shutdown system (security measure) |
+| No face detected | Allow sleep (user is away) |
 
-When reading ebooks on Linux systems, automatic sleep/suspend functionality interrupts reading sessions during periods of keyboard/mouse inactivity. This creates a frustrating experience where users must manually wake their systems to continue reading.
+## Features
 
-## Solution Overview
+- Real-time face detection and recognition using deep learning
+- Configurable confidence thresholds and detection parameters
+- Low-light image enhancement for improved detection
+- JSON-based configuration with sensible defaults
+- Comprehensive logging to file and systemd journal
+- Multiple fallback methods for system commands
+- Designed for systemd integration on Linux
 
-Sleep Checker is an intelligent monitoring system that uses computer vision and facial recognition to analyze user presence before system sleep events. The system makes smart decisions based on who (if anyone) is detected:
+## Requirements
 
-- **My face detected** → Reset sleep timer (stay awake for continued reading)
-- **Unknown person detected** → Shutdown system (security measure)
-- **No face detected** → Allow normal sleep (user is away)
+- Python 3.8+
+- Linux operating system with systemd
+- Webcam/camera device
+- Wayland or X11 display server
 
-## Technologies Used
+## Installation
 
-### Computer Vision
-- **OpenCV 4.x** - Traditional face detection using Haar cascades
-- **dlib** - Advanced facial recognition with deep learning models
-- **NumPy** - Numerical computations for image processing
+### 1. Clone the repository
 
-### Deep Learning Models
-- **ResNet Architecture** - Face recognition embeddings (`dlib_face_recognition_resnet_model_v1.dat`)
-- **Landmark Detection** - 68-point and 5-point facial landmark predictors
-- **CNN Face Detection** - Modern face detection using convolutional neural networks
+```bash
+git clone https://github.com/yourusername/sleep_checker.git
+cd sleep_checker
+```
 
-### Python Libraries
-- **face_recognition** - High-level interface for face recognition tasks
-- **pickle** - Serialization of face encoding data
-- **cv2** - OpenCV Python bindings
-- **time** - Performance monitoring and timing controls
+### 2. Create virtual environment
 
-### Development Environment
-- **Python 3.14+** - Core programming language
-- **Virtual Environment (venv)** - Isolated dependency management
-- **Git** - Version control with privacy-focused .gitignore configurations
+```bash
+python -m venv venv
+source venv/bin/activate
+```
+
+### 3. Install dependencies
+
+```bash
+pip install -r requirements.txt
+pip install ./face_recognition_models
+```
+
+### 4. Generate face encodings
+
+Before using the daemon, you need to create face encodings for recognition:
+
+```bash
+python phase2_face_training.py
+```
+
+Follow the interactive prompts to capture face images and generate the encoding file.
+
+### 5. Install as system service
+
+```bash
+# Copy the daemon script
+sudo cp phase5_service_daemon.py /usr/local/bin/sleep_checker.py
+sudo chmod +x /usr/local/bin/sleep_checker.py
+
+# Create systemd service
+sudo tee /etc/systemd/system/sleep-checker.service << 'EOF'
+[Unit]
+Description=Sleep Checker - Face Recognition Guard
+Before=sleep.target suspend.target hibernate.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sleep_checker.py pre
+TimeoutSec=30
+
+[Install]
+WantedBy=sleep.target suspend.target hibernate.target
+EOF
+
+# Enable the service
+sudo systemctl daemon-reload
+sudo systemctl enable sleep-checker.service
+```
+
+## Configuration
+
+The daemon reads configuration from `/etc/sleep_checker/config.json`. If the file does not exist, default values are used.
+
+### Default Configuration
+
+```json
+{
+    "encoding_file": "/path/to/me_encoding.pkl",
+    "log_file": "/path/to/sleep_checker.log",
+    "confidence_threshold": 0.4,
+    "detection_time": 5,
+    "scale_factor": 0.25,
+    "enable_shutdown_on_unknown": true,
+    "enable_logging": true
+}
+```
+
+### Configuration Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| encoding_file | string | - | Path to the pickle file containing face encodings |
+| log_file | string | - | Path to the log file |
+| confidence_threshold | float | 0.4 | Face match threshold (lower = stricter matching) |
+| detection_time | int | 5 | Duration in seconds to analyze webcam |
+| scale_factor | float | 0.25 | Frame resize factor for faster processing |
+| enable_shutdown_on_unknown | bool | true | Shutdown when unknown person detected |
+| enable_logging | bool | true | Enable file and console logging |
+
+## Usage
+
+### Running as systemd service
+
+Once installed, the service runs automatically when the system attempts to sleep:
+
+```bash
+# Check service status
+systemctl status sleep-checker.service
+
+# View logs
+journalctl -u sleep-checker.service
+```
+
+### Manual testing
+
+```bash
+# Test face recognition without system actions
+sudo /usr/local/bin/sleep_checker.py --test
+
+# Run as pre-sleep hook
+sudo /usr/local/bin/sleep_checker.py pre
+```
+
+### Command line arguments
+
+| Argument | Description |
+|----------|-------------|
+| pre | Run as pre-sleep hook (main functionality) |
+| post | Post-sleep hook (exits immediately) |
+| --test | Test mode - analyze webcam without system actions |
 
 ## Project Structure
 
 ```
 sleep_checker/
-├── phase1_face_detect.py      # Traditional face detection (Haar cascades)
-├── phase2_face_training.py    # Face data collection and encoding generation
-├── phase3_face_recognition.py # Real-time face recognition system
+├── phase5_service_daemon.py    # Main daemon script
+├── phase1_face_detect.py       # Basic face detection testing
+├── phase2_face_training.py     # Face image capture and encoding
+├── phase3_face_recognition.py  # Real-time recognition testing
+├── phase4_system_controller.py # System integration testing
+├── requirements.txt            # Python dependencies
 ├── data/
-│   ├── known_faces/          # Training face images (29+ samples)
-│   │   ├── me_0.jpg ... me_28.jpg
-│   │   └── .gitignore        # Privacy protection for personal images
-│   ├── me_encoding.pkl       # Serialized 128D face embeddings
-│   └── .gitignore            # Protection for generated data
-├── face_recognition_models/  # Self-contained model package
-│   ├── face_recognition_models/
-│   │   ├── __init__.py       # Model path definitions
-│   │   └── models/           # Pre-trained model files (~100MB)
-│   │       ├── dlib_face_recognition_resnet_model_v1.dat
-│   │       ├── shape_predictor_68_face_landmarks.dat
-│   │       ├── shape_predictor_5_face_landmarks.dat
-│   │       └── mmod_human_face_detector.dat
-│   ├── setup.py              # Package installation configuration
-│   └── .gitignore            # Excludes large model files from Git
-├── requirements.txt          # Python dependencies
-├── .gitignore               # Main project Git exclusions
-├── README.md                # Project documentation
-└── venv/                    # Python virtual environment
+│   ├── known_faces/            # Training face images
+│   ├── me_encoding.pkl         # Generated face encodings
+│   └── sleep_checker.log       # Daemon log file
+└── face_recognition_models/    # Pre-trained model files
+    └── models/
+        ├── dlib_face_recognition_resnet_model_v1.dat
+        ├── shape_predictor_68_face_landmarks.dat
+        └── mmod_human_face_detector.dat
 ```
-
-## Installation
-
-### Prerequisites
-- Python 3.8+ (developed with Python 3.14)
-- Webcam/camera device
-- Linux operating system
-- Git (for cloning)
-
-### Setup Instructions
-
-1. **Clone the repository:**
-   ```bash
-   git clone <your-repo-url>
-   cd sleep_checker
-   ```
-
-2. **Create and activate virtual environment:**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate
-   ```
-
-3. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Install custom face recognition models:**
-   ```bash
-   pip install ./face_recognition_models
-   ```
-
-5. **Verify installation:**
-   ```bash
-   python phase1_face_detect.py
-   ```
-
-## Usage
-
-### Phase 1: Basic Face Detection
-Test traditional computer vision face detection:
-```bash
-python phase1_face_detect.py
-```
-- **Controls:** 'q' to quit, SPACE for manual testing
-- **Purpose:** Verify camera functionality and basic detection
-
-### Phase 2: Face Training System
-Collect personal face data and generate encodings:
-```bash
-python phase2_face_training.py
-```
-- **Interactive workflow:** Choose to capture new images and/or encode existing ones
-- **Capture controls:** 's' to save face images, 'q' to finish
-- **Output:** Generates `data/me_encoding.pkl` with your face embeddings
-
-### Phase 3: Real-Time Recognition
-Live face recognition and classification:
-```bash
-python phase3_face_recognition.py
-```
-- **Controls:** 'q' to quit, SPACE for detailed recognition results
-- **Visual feedback:** Green=You, Red=Unknown person, Yellow=No face
-- **Purpose:** Production-ready recognition system
 
 ## How It Works
 
-### 1. Face Detection Pipeline
-- **Haar Cascade Classifiers** detect face regions in real-time video
-- **Optimized parameters** balance speed and accuracy
-- **Region of Interest** extraction for further processing
+1. The daemon is triggered by systemd before sleep/suspend events
+2. Webcam captures frames for the configured detection duration
+3. Each frame undergoes low-light enhancement and face detection
+4. Detected faces are compared against stored face encodings
+5. Based on the analysis results, the daemon makes a decision:
+   - If owner is detected: exits with code 1 to signal sleep prevention
+   - If unknown person is detected: initiates system shutdown
+   - If no face is detected: exits with code 0 to allow sleep
 
-### 2. Face Recognition Process
-- **ResNet-based CNN** generates 128-dimensional face embeddings
-- **Euclidean distance comparison** against stored personal embeddings
-- **Confidence thresholding** determines identity classification
+## Dependencies
 
-### 3. Decision Logic
-```python
-if face_detected and distance < threshold:
-    classification = "ME" → Action: Stay awake
-elif face_detected and distance >= threshold:
-    classification = "UNKNOWN" → Action: Shutdown
-else:
-    classification = "NO_FACE" → Action: Allow sleep
+- opencv-python - Computer vision and image processing
+- numpy - Numerical computations
+- face-recognition - High-level face recognition interface
+- face-recognition-models - Pre-trained deep learning models
+
+## Troubleshooting
+
+### Webcam not detected
+
+Ensure the webcam is accessible:
+
+```bash
+ls -la /dev/video*
 ```
 
-## Development Phases
+### Service not triggering
 
-### Phase 1: Traditional Computer Vision ✅ **COMPLETED**
-- **Technology:** OpenCV Haar cascade classifiers
-- **Purpose:** Proof-of-concept face detection
-- **Learning:** Understanding computer vision fundamentals
-- **Performance:** ~30 FPS on 640x480 resolution
+Verify the service is enabled and linked to sleep targets:
 
-### Phase 2: Personal Face Training ✅ **COMPLETED**
-- **Technology:** Deep learning face recognition (dlib/ResNet)
-- **Process:** Interactive image capture → Encoding generation
-- **Dataset:** 29+ personal face images with varied lighting/angles
-- **Output:** 128-dimensional face embeddings for comparison
+```bash
+systemctl show sleep-checker.service --property=WantedBy
+```
 
-### Phase 3: Real-Time Recognition ✅ **COMPLETED**
-- **Technology:** Live video processing with cached recognition
-- **Performance:** Optimized to process every 5th frame
-- **Features:** Visual feedback, confidence scoring, FPS monitoring
-- **Status:** Production-ready recognition system
+### Face not recognized
 
-## Performance
-
-### Optimization Techniques
-- **Frame rate optimization:** Process every 5th frame for 5x speed improvement
-- **Resolution scaling:** 0.25x scale factor for faster face detection
-- **Result caching:** Smooth visual feedback between processing frames
-- **Webcam configuration:** Limited to 640x480@30fps for consistent performance
-
-### Measured Performance
-- **Face Detection:** ~25-30 FPS (Phase 1)
-- **Face Recognition:** ~6 FPS effective processing (Phase 3)
-- **Model Loading:** ~2-3 seconds startup time
-- **Memory Usage:** ~200MB including loaded models
-
-### Recognition Accuracy
-- **Confidence Threshold:** 0.6 (balance between security and usability)
-- **False Positive Rate:** Low (tested with multiple unknown individuals)
-- **False Negative Rate:** Minimal (robust to lighting changes and angles)
-
-## Future Enhancements
-
-### Phase 4: System Integration (Planned)
-- Integration with Linux power management (systemd)
-- Automatic execution before sleep/suspend events
-- System action implementation (prevent sleep/shutdown)
-
-### Phase 5: Production Service (Planned)
-- Background daemon service
-- Configuration file support
-- Logging and monitoring
-- Auto-start on boot
-
-### Advanced Features (Future)
-- **Multi-user support:** Multiple authorized face profiles
-- **Adaptive learning:** Automatic model improvement over time
-- **Activity detection:** Distinguish between active reading and sleeping
-- **Remote notifications:** Email/SMS alerts for security events
-- **Privacy controls:** Scheduled disable periods
-
-## References
-
-### Research Papers
-- **Deep Face Recognition:** Schroff, Florian, et al. "FaceNet: A unified embedding for face recognition and clustering." CVPR 2015.
-- **ResNet Architecture:** He, Kaiming, et al. "Deep residual learning for image recognition." CVPR 2016.
-
-### Libraries and Frameworks
-- **OpenCV:** Bradski, Gary. "The OpenCV library." Dr. Dobb's journal 25.11 (2000): 120-125.
-- **dlib:** King, Davis E. "Dlib-ml: A machine learning toolkit." JMLR 10 (2009): 1755-1758.
-- **face_recognition:** Geitgey, Adam. "face_recognition library" - https://github.com/ageitgey/face_recognition
-
-### Model Sources
-- **dlib models:** https://github.com/davisking/dlib-models
-- **Haar cascades:** Viola, Paul, and Michael Jones. "Rapid object detection using a boosted cascade of simple features." CVPR 2001.
-
-### Educational Resources
-- **Computer Vision:** Szeliski, Richard. "Computer vision: algorithms and applications." Springer 2010.
-- **Deep Learning:** Goodfellow, Ian, et al. "Deep learning." MIT Press 2016.
+- Ensure adequate lighting during detection
+- Regenerate face encodings with varied lighting conditions
+- Adjust the confidence_threshold value
 
 ## License
 
-This project is developed for educational purposes. Model files and libraries maintain their respective licenses:
-- **dlib models:** Boost Software License
-- **OpenCV:** Apache 2.0 License
-- **face_recognition library:** MIT License
+This project is developed for educational purposes. Dependencies maintain their respective licenses:
 
----
+- dlib models: Boost Software License
+- OpenCV: Apache 2.0 License
+- face_recognition: MIT License
 
-**Note:** This system processes personal biometric data (face images). Ensure compliance with local privacy laws and regulations. All face data is stored locally and not transmitted to external services.
+## Privacy Notice
 
-**First Project Achievement:** This represents a complete computer vision pipeline from basic detection to production-ready recognition, demonstrating proficiency in OpenCV, deep learning, Python development, and system integration concepts.
+This system processes biometric data (face images). All data is stored and processed locally. No data is transmitted to external services.
