@@ -4,7 +4,7 @@ import pickle
 import numpy as np
 
 ENCODING_FILE = "data/me_encoding.pkl"
-CONFIDENCE_THRESHOLD = 0.6 # Lower = more strict matching 
+CONFIDENCE_THRESHOLD = 0.4 # Lower = more strict matching 
 SCALE_FACTOR = 0.25 # Process smaller frames for speed
 
 # Load known encodings

@@ -11,7 +11,7 @@ from datetime import datetime
 
 # Configuration
 ENCODING_FILE = "data/me_encoding.pkl"
-CONFIDENCE_THRESHOLD = 0.6
+CONFIDENCE_THRESHOLD = 0.45
 SCALE_FACTOR = 0.25
 DETECTION_TIME = 5
 LOG_FILE = "data/sleep_controller.log"
