@@ -70,6 +70,7 @@ sudo cp phase5_service_daemon.py /usr/local/bin/sleep_checker.py
 sudo chmod +x /usr/local/bin/sleep_checker.py
 
 # Create systemd service
+# NOTE: Use RequiredBy (not WantedBy) so that service failure blocks sleep
 sudo tee /etc/systemd/system/sleep-checker.service << 'EOF'
 [Unit]
 Description=Sleep Checker - Face Recognition Guard
@@ -77,11 +78,11 @@ Before=sleep.target suspend.target hibernate.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/sleep_checker.py pre
+ExecStart=/path/to/your/venv/bin/python /usr/local/bin/sleep_checker.py pre
 TimeoutSec=30
 
 [Install]
-WantedBy=sleep.target suspend.target hibernate.target
+RequiredBy=sleep.target suspend.target hibernate.target
 EOF
 
 # Enable the service
