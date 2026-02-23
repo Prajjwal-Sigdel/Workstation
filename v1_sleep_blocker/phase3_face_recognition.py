@@ -2,8 +2,12 @@ import cv2
 import face_recognition
 import pickle
 import numpy as np
+import os
 
-ENCODING_FILE = "data/me_encoding.pkl"
+# Paths relative to project root
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+ENCODING_FILE = os.path.join(PROJECT_ROOT, "data/me_encoding.pkl")
 CONFIDENCE_THRESHOLD = 0.4 # Lower = more strict matching 
 SCALE_FACTOR = 0.25 # Process smaller frames for speed
 

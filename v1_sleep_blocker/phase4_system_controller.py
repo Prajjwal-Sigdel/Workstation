@@ -9,12 +9,14 @@ import signal
 import sys
 from datetime import datetime
 
-# Configuration
-ENCODING_FILE = "data/me_encoding.pkl"
+# Configuration - paths relative to project root
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+ENCODING_FILE = os.path.join(PROJECT_ROOT, "data/me_encoding.pkl")
 CONFIDENCE_THRESHOLD = 0.45
 SCALE_FACTOR = 0.25
 DETECTION_TIME = 5
-LOG_FILE = "data/sleep_controller.log"
+LOG_FILE = os.path.join(PROJECT_ROOT, "data/sleep_controller.log")
 
 class SleepController:  # Fixed: was sleepController
     def __init__(self):
@@ -23,7 +25,7 @@ class SleepController:  # Fixed: was sleepController
         self.display_server = self.detect_display_server()
 
         # Ensure data directory exists
-        os.makedirs("data", exist_ok=True)
+        os.makedirs(os.path.join(PROJECT_ROOT, "data"), exist_ok=True)
 
     def detect_display_server(self):
         """Detect if running on X11 or Wayland"""

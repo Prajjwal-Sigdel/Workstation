@@ -1,0 +1,23 @@
+# Sleep Checker - Systemd Service Template
+# 
+# Installation:
+#   1. Copy this file to /etc/systemd/system/sleep-checker.service
+#   2. Update the paths below to match your setup
+#   3. Run: sudo systemctl daemon-reload
+#   4. Run: sudo systemctl enable sleep-checker.service
+#
+# NOTE: Uses RequiredBy (not WantedBy) so that service failure blocks sleep
+
+[Unit]
+Description=Sleep Checker - Face Recognition Guard
+Before=sleep.target suspend.target hibernate.target
+
+[Service]
+Type=oneshot
+# UPDATE THIS PATH to your venv and script location:
+ExecStart=/path/to/your/venv/bin/python /usr/local/bin/sleep_checker.py pre
+TimeoutSec=30
+
+[Install]
+# RequiredBy creates a hard dependency - if this service fails, sleep is blocked
+RequiredBy=sleep.target suspend.target hibernate.target

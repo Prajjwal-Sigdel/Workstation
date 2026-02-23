@@ -4,14 +4,16 @@ import os
 import pickle
 import time
 
-# Configuration
-KNOWN_DIR = "data/known_faces"
-ENCODING_FILE = "data/me_encoding.pkl"
+# Configuration - paths relative to project root
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+KNOWN_DIR = os.path.join(PROJECT_ROOT, "data/known_faces")
+ENCODING_FILE = os.path.join(PROJECT_ROOT, "data/me_encoding.pkl")
 CAPTURE_COOLDOWN = 1.0  # Seconds between captures to prevent spam
 
 # Ensure directories exist
 os.makedirs(KNOWN_DIR, exist_ok=True)
-os.makedirs("data", exist_ok=True)
+os.makedirs(os.path.join(PROJECT_ROOT, "data"), exist_ok=True)
 
 def get_next_filename():
     """Get the next available filename (me_0.jpg, me_1.jpg, etc.)"""

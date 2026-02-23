@@ -1,16 +1,23 @@
 # Sleep Checker
 
-A face recognition-based system daemon for Linux that monitors user presence before system sleep events. The daemon analyzes webcam input to make intelligent decisions about whether to allow sleep, prevent sleep, or shutdown the system.
+A face recognition-based system for Linux that monitors user presence and controls system behavior (sleep, screen lock, etc.) based on whether you're at your computer.
+
+## Versions
+
+| Version | Description | Status |
+|---------|-------------|--------|
+| [v1_sleep_blocker](v1_sleep_blocker/) | Blocks system sleep when you're present | ✅ Working |
+| v2_idle_monitor | Prevents screen dim/lock when you're present | 🚧 Coming Soon |
 
 ## Overview
 
-Sleep Checker intercepts system sleep events and uses facial recognition to determine the appropriate action:
+Sleep Checker uses facial recognition to determine the appropriate system action:
 
 | Detection Result | Action |
 |------------------|--------|
-| Owner detected | Block sleep (user is present) |
+| Owner detected | Block sleep / Keep screen awake |
 | Unknown person detected | Shutdown system (security measure) |
-| No face detected | Allow sleep (user is away) |
+| No face detected | Allow sleep / Allow screen lock |
 
 ## Features
 
@@ -29,77 +36,69 @@ Sleep Checker intercepts system sleep events and uses facial recognition to dete
 - Webcam/camera device
 - Wayland or X11 display server
 
-## Installation
+## Quick Start
 
-### 1. Clone the repository
+### 1. Clone and setup
 
 ```bash
 git clone https://github.com/yourusername/sleep_checker.git
 cd sleep_checker
-```
-
-### 2. Create virtual environment
-
-```bash
 python -m venv venv
 source venv/bin/activate
-```
-
-### 3. Install dependencies
-
-```bash
 pip install -r requirements.txt
 pip install ./face_recognition_models
 ```
 
-### 4. Generate face encodings
-
-Before using the daemon, you need to create face encodings for recognition:
+### 2. Train face recognition
 
 ```bash
-python phase2_face_training.py
+python v1_sleep_blocker/phase2_face_training.py
 ```
 
-Follow the interactive prompts to capture face images and generate the encoding file.
+### 3. Install the service
 
-### 5. Install as system service
+See [v1_sleep_blocker/README.md](v1_sleep_blocker/README.md) for detailed installation instructions.
 
-```bash
-# Copy the daemon script
-sudo cp phase5_service_daemon.py /usr/local/bin/sleep_checker.py
-sudo chmod +x /usr/local/bin/sleep_checker.py
+## Project Structure
 
-# Create systemd service
-# NOTE: Use RequiredBy (not WantedBy) so that service failure blocks sleep
-sudo tee /etc/systemd/system/sleep-checker.service << 'EOF'
-[Unit]
-Description=Sleep Checker - Face Recognition Guard
-Before=sleep.target suspend.target hibernate.target
-
-[Service]
-Type=oneshot
-ExecStart=/path/to/your/venv/bin/python /usr/local/bin/sleep_checker.py pre
-TimeoutSec=30
-
-[Install]
-RequiredBy=sleep.target suspend.target hibernate.target
-EOF
-
-# Enable the service
-sudo systemctl daemon-reload
-sudo systemctl enable sleep-checker.service
+```
+sleep_checker/
+├── README.md                      # This file
+├── requirements.txt               # Python dependencies
+├── venv/                          # Virtual environment (shared)
+│
+├── v1_sleep_blocker/              # Sleep blocking system
+│   ├── README.md                  # v1-specific documentation
+│   ├── phase1_face_detect.py      # Basic face detection testing
+│   ├── phase2_face_training.py    # Face image capture and encoding
+│   ├── phase3_face_recognition.py # Real-time recognition testing
+│   ├── phase4_system_controller.py# System integration testing
+│   ├── phase5_service_daemon.py   # Main daemon script
+│   └── service/
+│       └── sleep-checker.service  # Systemd service template
+│
+├── v2_idle_monitor/               # Idle/screen lock prevention (coming soon)
+│
+├── data/                          # Shared data
+│   ├── known_faces/               # Training face images
+│   ├── me_encoding.pkl            # Generated face encodings
+│   └── sleep_checker.log          # Daemon log file
+│
+└── face_recognition_models/       # Pre-trained model files
+    └── models/
+        ├── dlib_face_recognition_resnet_model_v1.dat
+        ├── shape_predictor_68_face_landmarks.dat
+        └── mmod_human_face_detector.dat
 ```
 
 ## Configuration
 
 The daemon reads configuration from `/etc/sleep_checker/config.json`. If the file does not exist, default values are used.
 
-### Default Configuration
-
 ```json
 {
-    "encoding_file": "/path/to/me_encoding.pkl",
-    "log_file": "/path/to/sleep_checker.log",
+    "encoding_file": "/path/to/data/me_encoding.pkl",
+    "log_file": "/path/to/data/sleep_checker.log",
     "confidence_threshold": 0.4,
     "detection_time": 5,
     "scale_factor": 0.25,
@@ -107,8 +106,6 @@ The daemon reads configuration from `/etc/sleep_checker/config.json`. If the fil
     "enable_logging": true
 }
 ```
-
-### Configuration Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -119,70 +116,6 @@ The daemon reads configuration from `/etc/sleep_checker/config.json`. If the fil
 | scale_factor | float | 0.25 | Frame resize factor for faster processing |
 | enable_shutdown_on_unknown | bool | true | Shutdown when unknown person detected |
 | enable_logging | bool | true | Enable file and console logging |
-
-## Usage
-
-### Running as systemd service
-
-Once installed, the service runs automatically when the system attempts to sleep:
-
-```bash
-# Check service status
-systemctl status sleep-checker.service
-
-# View logs
-journalctl -u sleep-checker.service
-```
-
-### Manual testing
-
-```bash
-# Test face recognition without system actions
-sudo /usr/local/bin/sleep_checker.py --test
-
-# Run as pre-sleep hook
-sudo /usr/local/bin/sleep_checker.py pre
-```
-
-### Command line arguments
-
-| Argument | Description |
-|----------|-------------|
-| pre | Run as pre-sleep hook (main functionality) |
-| post | Post-sleep hook (exits immediately) |
-| --test | Test mode - analyze webcam without system actions |
-
-## Project Structure
-
-```
-sleep_checker/
-├── phase5_service_daemon.py    # Main daemon script
-├── phase1_face_detect.py       # Basic face detection testing
-├── phase2_face_training.py     # Face image capture and encoding
-├── phase3_face_recognition.py  # Real-time recognition testing
-├── phase4_system_controller.py # System integration testing
-├── requirements.txt            # Python dependencies
-├── data/
-│   ├── known_faces/            # Training face images
-│   ├── me_encoding.pkl         # Generated face encodings
-│   └── sleep_checker.log       # Daemon log file
-└── face_recognition_models/    # Pre-trained model files
-    └── models/
-        ├── dlib_face_recognition_resnet_model_v1.dat
-        ├── shape_predictor_68_face_landmarks.dat
-        └── mmod_human_face_detector.dat
-```
-
-## How It Works
-
-1. The daemon is triggered by systemd before sleep/suspend events
-2. Webcam captures frames for the configured detection duration
-3. Each frame undergoes low-light enhancement and face detection
-4. Detected faces are compared against stored face encodings
-5. Based on the analysis results, the daemon makes a decision:
-   - If owner is detected: exits with code 1 to signal sleep prevention
-   - If unknown person is detected: initiates system shutdown
-   - If no face is detected: exits with code 0 to allow sleep
 
 ## Dependencies
 
@@ -195,18 +128,14 @@ sleep_checker/
 
 ### Webcam not detected
 
-Ensure the webcam is accessible:
-
 ```bash
 ls -la /dev/video*
 ```
 
 ### Service not triggering
 
-Verify the service is enabled and linked to sleep targets:
-
 ```bash
-systemctl show sleep-checker.service --property=WantedBy
+systemctl show sleep-checker.service --property=RequiredBy
 ```
 
 ### Face not recognized
