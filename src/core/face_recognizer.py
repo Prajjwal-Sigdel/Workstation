@@ -1,39 +1,52 @@
 """
-Face Recognizer
-Recognizes faces using face_recognition library (dlib-based)
+Face Recognizer using OpenCV
+Recognizes faces using OpenCV's LBPH (Local Binary Patterns Histograms) face recognizer
 """
 
-import face_recognition
+import cv2
 import numpy as np
 import pickle
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, Tuple, List
+
 
 class FaceRecognizer:
-    """Face recognition and comparision using face_recognition library"""
-
-    def __init__(self, encodings_path: str = "models/face_encodings.pkl", tolerance: float = 0.6, model: str = "large"):
+    """OpenCV-based face recognition using LBPH algorithm"""
+    
+    def __init__(
+        self,
+        encodings_path: str = "models/face_encodings.pkl",
+        confidence_threshold: float = 50.0
+    ):
         """
         Initialize face recognizer
         
         Args:
-            encodings_path: Path to saved face encodings
-            tolerance: Recognition threshold (lower = more strict)
-            model: Recognition model ('large' or 'small')
+            encodings_path: Path to saved face model
+            confidence_threshold: Recognition threshold (lower = more strict, 0-100)
+                                 Typical values: 40-60 (lower is stricter)
         """
         self.encodings_path = Path(encodings_path)
-        self.tolerance = tolerance
-        self.model = model
-        self.known_encodings: List[np.ndarray] = []
+        self.confidence_threshold = confidence_threshold
         self.owner_name = "owner"
-
-        # Load encodings if file exists
+        
+        # Create LBPH face recognizer
+        self.recognizer = cv2.face.LBPHFaceRecognizer_create(
+            radius=1,
+            neighbors=8,
+            grid_x=8,
+            grid_y=8
+        )
+        
+        self.is_model_trained = False
+        
+        # Load model if exists
         if self.encodings_path.exists():
-            self.load_encodings()
-
-    def load_encodings(self) -> bool:
+            self.load_model()
+    
+    def load_model(self) -> bool:
         """
-        Load face encodings from pickle file
+        Load trained face recognition model
         
         Returns:
             True if loaded successfully, False otherwise
@@ -41,106 +54,148 @@ class FaceRecognizer:
         try:
             with open(self.encodings_path, 'rb') as f:
                 data = pickle.load(f)
-                self.known_encodings = data.get('encodings', [])
+                
+                # Extract model data
+                model_data = data.get('model_data')
                 self.owner_name = data.get('name', 'owner')
-            return len(self.known_encodings) > 0
+                
+                if model_data:
+                    # Save to temp file and load (OpenCV requirement)
+                    temp_model = self.encodings_path.parent / "temp_model.yml"
+                    with open(temp_model, 'wb') as tm:
+                        tm.write(model_data)
+                    
+                    self.recognizer.read(str(temp_model))
+                    temp_model.unlink()  # Delete temp file
+                    
+                    self.is_model_trained = True
+                    return True
+            
+            return False
         except Exception as e:
-            print(f"Error loading encodings: {e}")
+            print(f"Error loading model: {e}")
             return False
     
-    def get_face_encoding(self, face_image: np.ndarray) -> Optional[np.ndarray]:
+    def save_model(self) -> bool:
         """
-        Generate face encoding from image
-        
-        Args:
-            face_image: Face image (RGB format)
+        Save trained model to pickle file
         
         Returns:
-            128-dimensional face encoding or None
+            True if saved successfully
         """
         try:
-            # Detect faces in the image
-            face_locations = face_recognition.face_locations(face_image, model=self.model)
-
-            if not face_locations:
-                return None
+            # Create directory if needed
+            self.encodings_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Get encoding for the first face
-            encodings = face_recognition.face_encodings(face_image, face_locations)
-
-            if encodings:
-                return encodings[0]
+            # Save model to temp file first
+            temp_model = self.encodings_path.parent / "temp_model.yml"
+            self.recognizer.write(str(temp_model))
             
-            return None
+            # Read model data
+            with open(temp_model, 'rb') as tm:
+                model_data = tm.read()
+            
+            # Save to pickle
+            data = {
+                'model_data': model_data,
+                'name': self.owner_name,
+                'threshold': self.confidence_threshold
+            }
+            
+            with open(self.encodings_path, 'wb') as f:
+                pickle.dump(data, f)
+            
+            # Cleanup temp file
+            temp_model.unlink()
+            
+            return True
         except Exception as e:
-            print(f"Error generating encoding: {e}")
-            return None
+            print(f"Error saving model: {e}")
+            return False
+    
+    def train(self, face_images: List[np.ndarray], labels: Optional[List[int]] = None) -> bool:
+        """
+        Train recognizer with face images
         
+        Args:
+            face_images: List of face images (grayscale, same size recommended)
+            labels: List of labels (all same for owner, e.g., all 1)
+        
+        Returns:
+            True if training successful
+        """
+        if not face_images:
+            print("No face images provided for training")
+            return False
+        
+        # Convert all images to grayscale and resize to standard size
+        processed_faces = []
+        for img in face_images:
+            if len(img.shape) == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            # Resize to standard size (100x100)
+            img = cv2.resize(img, (100, 100))
+            processed_faces.append(img)
+        
+        # Create labels (all same for owner)
+        if labels is None:
+            labels = [1] * len(processed_faces)  # Label 1 = owner
+        
+        try:
+            # Train the recognizer
+            self.recognizer.train(processed_faces, np.array(labels))
+            self.is_model_trained = True
+            
+            # Save the model
+            self.save_model()
+            
+            return True
+        except Exception as e:
+            print(f"Error training model: {e}")
+            return False
+    
     def recognize(self, face_image: np.ndarray) -> Tuple[bool, float]:
         """
         Recognize if face belongs to owner
         
         Args:
-            face_image: Face image (RGB format)
+            face_image: Face image (BGR or grayscale)
         
         Returns:
-            Tuple (is_owner, confidence_distance)
+            Tuple (is_owner, confidence)
             - is_owner: True if owner recognized
-            - confidence_distance: Lower is better (0 = perfect match)
+            - confidence: Lower is better (0 = perfect match)
         """
-        if not self.known_encodings:
-            return False, 1.0
+        if not self.is_model_trained:
+            return False, 100.0
         
-        # Get encoding for input face
-        face_encoding = self.get_face_encoding(face_image)
-
-        if face_encoding is None:
-            return False, 1.0
+        try:
+            # Convert to grayscale if needed
+            if len(face_image.shape) == 3:
+                gray = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = face_image
+            
+            # Resize to standard size
+            gray = cv2.resize(gray, (100, 100))
+            
+            # Predict
+            label, confidence = self.recognizer.predict(gray)
+            
+            # Label 1 = owner, confidence should be below threshold
+            is_owner = (label == 1) and (confidence < self.confidence_threshold)
+            
+            return is_owner, float(confidence)
         
-        # Compare against all known encodings
-        distances = face_recognition.face_distance(self.known_encodings, face_encoding)
-
-        # Get the best match
-        min_distance = float(np.min(distances))
-        is_match = min_distance <= self.tolerance
-
-        return is_match, min_distance
+        except Exception as e:
+            print(f"Error during recognition: {e}")
+            return False, 100.0
     
-    def recognize_multiple(self, face_image: np.ndarray) -> List[Tuple[bool, float]]:
-        """
-        Recognize all faces in image
-        
-        Args:
-            face_image: Image with potentially multiple faces
-        
-        Returns:
-            List of (is_owner, distance) for each face
-        """
-        if not self.known_encodings:
-            return []
-        
-        # Detect all faces
-        face_locations = face_recognition.face_locations(face_image, model=self.model)
-
-        if not face_locations:
-            return []
-        
-        # Get encodings for all faces
-        face_encodings = face_recognition.face_encodings(face_image, face_locations)
-
-        results = []
-        for encoding in face_encodings:
-            distances = face_recognition.face_distance(self.known_encodings, encoding)
-            min_distance = float(np.min(distances))
-            is_match = min_distance <= self.tolerance
-            results.append((is_match, min_distance))
-
-        return results
-
-    def set_tolerance(self, tolerance: float) -> None:
-        """Update recognition tolerance threshold"""
-        self.tolerance = tolerance
-
+    def set_threshold(self, threshold: float) -> None:
+        """Update recognition confidence threshold"""
+        self.confidence_threshold = threshold
+    
     def is_trained(self) -> bool:
         """Check if model has been trained"""
-        return len(self.known_encodings)>0
+        return self.is_model_trained
