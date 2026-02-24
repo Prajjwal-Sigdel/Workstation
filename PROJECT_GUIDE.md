@@ -26,7 +26,7 @@ sleep_checker/
 │   │
 │   ├── monitors/                         # Different monitoring strategies
 │   │   ├── __init__.py                   # Package initializer
-│   │   ├── idle_monitor.py               # Listens to KDE idle state via D-Bus
+│   │   ├── idle_monitor.py               # Listens to custom KWin D-Bus signal for idle dim
 │   │   └── sleep_monitor.py              # Intercepts system sleep events (v1 approach)
 │   │
 │   ├── utils/                            # Helper utilities
@@ -46,7 +46,7 @@ sleep_checker/
 │   ├── step4_train_face_model.py         # Generate face encodings
 │   ├── step5_test_recognition.py         # Test face recognition in real-time
 │   ├── step6_test_system_inhibitor.py    # Test preventing screen dim/sleep
-│   ├── step7_test_idle_detection.py      # Test KDE idle event detection
+│   ├── step7_test_idle_detection.py      # Test KWin idle dim signal detection
 │   └── step8_full_integration.py         # Test complete system before service
 │
 ├── models/                                # Machine learning models
@@ -68,11 +68,21 @@ sleep_checker/
 │   ├── default_config.json               # Default configuration (committed to git)
 │   └── user_config.json                  # User overrides (gitignored, optional)
 │
+├── kwin-scripts/                          # KWin scripting for idle dim detection
+│   └── sleep-checker-idle/               # KWin script package
+│       ├── metadata.json                 # KWin script metadata (id, name, version, api)
+│       ├── contents/
+│       │   └── code/
+│       │       └── main.js               # KWin script: emits D-Bus signal on screen dim
+│       └── install.sh                    # Script to install/register KWin script
+│
 ├── scripts/                               # Helper scripts
 │   ├── download_model.sh                 # Download YuNet model
 │   ├── capture_faces.sh                  # Helper to capture training photos
 │   ├── install_service.sh                # Install systemd service
 │   ├── uninstall_service.sh              # Remove systemd service
+│   ├── install_kwin_script.sh            # Install KWin idle dim script
+│   ├── uninstall_kwin_script.sh          # Remove KWin idle dim script
 │   └── test_camera.sh                    # Quick camera test
 │
 ├── service/                               # Systemd integration
@@ -103,28 +113,64 @@ When studying or writing in front of the screen, after some inactivity, the PC a
 ## Solution Overview
 
 A user-space service that:
-1. **Monitors KDE idle events using D-Bus**
-   - Connects to KDE's `org.freedesktop.ScreenSaver` D-Bus interface
-   - Listens for `ActiveChanged` signal when user becomes idle
-   - No polling required - event-driven approach
-2. **When idle threshold is reached**, captures webcam image
+1. **Detects when KDE dims the screen due to inactivity using a custom KWin script**
+   - A KWin script hooks into the compositor's idle dim event
+   - When screen dims, the KWin script emits a custom D-Bus signal
+   - The Python service subscribes to this custom signal
+   - Purely event-driven - no polling required
+2. **When the dim signal fires**, captures webcam image
 3. **Runs face detection and recognition**
 4. **Takes action based on detection**:
    - **User recognized** → Inhibit screen dim/lock/sleep via D-Bus (keep PC active)
    - **No face detected** → Allow normal behavior (dim/sleep)
    - **Unknown person detected** → Shutdown PC (security measure)
 
-### Why D-Bus?
+### Why KWin Scripting + D-Bus?
 
-D-Bus (Desktop Bus) is the standard inter-process communication (IPC) system on Linux desktops:
-- **Event-driven**: No need to constantly poll - KDE sends signals automatically
-- **Low overhead**: Minimal CPU usage waiting for events
-- **Standard protocol**: Works with KDE, GNOME, and other desktop environments
-- **Bidirectional**: Can both listen to events and control system behavior
+**The Problem with Standard D-Bus Signals on Wayland:**
+- `org.freedesktop.ScreenSaver.ActiveChanged` fires only when screensaver activates or screen locks, NOT when screen merely dims
+- KDE PowerDevil handles brightness changes internally without reliably emitting D-Bus signals on Wayland
+- Standard idle detection APIs (like `org.kde.KIdleTime`) may not be accessible on all Wayland sessions
+- Polling-based approaches waste CPU and are not truly event-driven
+
+**The Solution - KWin Script as Event Source:**
+- KWin is KDE's window compositor and has full access to screen state changes
+- KWin scripts run inside the compositor process and can detect the exact moment the screen dims due to inactivity
+- KWin scripts can call `callDBus()` to emit custom D-Bus signals
+- This gives us a **reliable, event-driven signal** that fires precisely when the screen dims from inactivity — not from lid close, not from sleep button, only from idle timeout
 
 **Two D-Bus interfaces used:**
-1. **`org.freedesktop.ScreenSaver`** - Receive idle state changes from KDE
+1. **`org.sleepchecker.IdleNotifier`** (Custom) - Receive screen dim event from KWin script
 2. **`org.freedesktop.PowerManagement.Inhibit`** - Prevent screen dim/lock/sleep
+
+### How KWin Scripting Works
+
+KWin scripts are JavaScript files that run inside KDE's KWin compositor. They have access to:
+- **Workspace API** - Window management, virtual desktops, screen state
+- **`callDBus()`** - Emit D-Bus signals or call D-Bus methods from inside the compositor
+- **Idle/dim events** - React to compositor-level screen changes
+
+**KWin Script Lifecycle:**
+1. Script is installed to `~/.local/share/kwin/scripts/`
+2. Registered and enabled via `kwriteconfig6` or KDE System Settings
+3. Loaded automatically by KWin on login
+4. Runs inside KWin process with compositor-level access
+5. Persists across sessions until explicitly disabled
+
+**Our Custom Signal Flow:**
+```
+KDE Idle Timer (configured in Power Management)
+    ↓
+KWin detects idle → begins screen dim
+    ↓
+KWin script intercepts dim event
+    ↓
+callDBus() emits signal on org.sleepchecker.IdleNotifier
+    ↓
+Python IdleMonitor receives signal
+    ↓
+Face detection pipeline triggered
+```
 
 ---
 
@@ -146,6 +192,7 @@ mkdir -p examples
 mkdir -p models
 mkdir -p data/{known_faces/owner,logs}
 mkdir -p config
+mkdir -p kwin-scripts/sleep-checker-idle/contents/code
 mkdir -p scripts
 mkdir -p service
 mkdir -p docs
@@ -173,9 +220,8 @@ source venv/bin/activate
 #### Step 0.4: Create requirements.txt
 **File:** `requirements.txt`
 ```
-opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
 numpy>=1.24.0
-face-recognition>=1.3.0
 dbus-next>=0.2.3
 ```
 
@@ -261,7 +307,7 @@ ls -lh models/yunet.onnx
 - Camera settings (device index, resolution)
 - Face detection thresholds
 - Recognition confidence levels
-- Idle timeout settings
+- Custom D-Bus signal settings (service name, interface, signal name)
 - System behavior settings (inhibit/shutdown)
 - Logging configuration
 
@@ -276,11 +322,13 @@ ls -lh models/yunet.onnx
   },
   "detection": {
     "score_threshold": 0.5,
-    "recognition_threshold": 0.6
+    "recognition_threshold": 50.0
   },
   "idle": {
-    "check_interval": 5,
-    "kde_idle_timeout": 300
+    "dbus_service": "org.sleepchecker.IdleNotifier",
+    "dbus_path": "/org/sleepchecker/IdleNotifier",
+    "dbus_interface": "org.sleepchecker.IdleNotifier",
+    "dbus_signal": "ScreenDimmed"
   },
   "actions": {
     "unknown_person_action": "shutdown",
@@ -365,33 +413,34 @@ ls -lh models/yunet.onnx
 **Key class:** `FaceRecognizer`
 
 **Key methods:**
-- `__init__(encodings_path)` - Loads trained face encodings
-- `load_encodings()` - Loads from .pkl file
-- `recognize(face_image)` - Compares face against known faces
-- `get_face_encoding(face_image)` - Generates encoding from face crop
+- `__init__(encodings_path)` - Loads trained face model
+- `load_model()` - Loads LBPH model from .pkl file
+- `recognize(face_image)` - Compares face against trained model
+- `train(face_images)` - Trains LBPH model with face samples
 
 **How it works:**
-1. Uses face_recognition library (dlib-based)
-2. Compares face encodings using Euclidean distance
-3. Returns True if distance < threshold (owner recognized)
+1. Uses OpenCV's LBPH (Local Binary Patterns Histograms) face recognizer
+2. Compares face patterns against trained model
+3. Returns (is_owner, confidence) where lower confidence = better match
+4. No external dependencies beyond opencv-contrib-python
 
 #### Step 4.3: Face Trainer
 **File:** `src/core/face_trainer.py`
 
-**Purpose:** Generates face encodings from training images.
+**Purpose:** Generates trained face model from captured images.
 
 **Key class:** `FaceTrainer`
 
 **Key methods:**
 - `__init__(data_dir)` - Sets training data directory
-- `train()` - Processes all images, generates encodings
-- `save_encodings(output_path)` - Saves to .pkl file
+- `train()` - Processes all images, trains LBPH model
+- Uses FaceDetector internally to extract face regions from images
 
 **How it works:**
 1. Scans `data/known_faces/owner/` directory
-2. For each image, detects face and generates encoding
-3. Averages multiple encodings for robustness
-4. Saves to `models/face_encodings.pkl`
+2. For each image, detects face using YuNet and crops it
+3. Trains OpenCV LBPH recognizer with all cropped faces
+4. Saves trained model to `models/face_encodings.pkl`
 
 #### Step 4.4: System Controller
 **File:** `src/core/system_controller.py`
@@ -421,7 +470,6 @@ ls -lh models/yunet.onnx
   - `Inhibit(application_name, reason)` → Returns uint32 cookie
   - `UnInhibit(cookie)` → Releases inhibitor
   - `HasInhibit()` → Returns boolean
-  - `ListInhibitors()` → Returns array of active inhibitors
 
 **Example D-Bus Call:**
 ```bash
@@ -431,71 +479,151 @@ dbus-send --session --print-reply \
   /org/freedesktop/PowerManagement/Inhibit \
   org.freedesktop.PowerManagement.Inhibit.Inhibit \
   string:"SleepChecker" string:"User is present"
-
-# List active inhibitors
-busctl --user call org.freedesktop.PowerManagement.Inhibit \
-  /org/freedesktop/PowerManagement/Inhibit \
-  org.freedesktop.PowerManagement.Inhibit ListInhibitors
 ```
-
-**What gets inhibited:**
-- Screen dimming
-- Screen lock (screensaver)
-- System suspend/sleep
-- Automatic hibernation
 
 ---
 
-### Phase 5: Monitor Modules
+### Phase 5: KWin Script for Idle Dim Detection
 
-#### Step 5.1: Idle Monitor
+#### Why KWin Scripting?
+
+On KDE Wayland, there is no standard D-Bus signal that fires specifically when the screen dims due to user inactivity. Screen dimming is handled internally by the KWin compositor and KDE PowerDevil, without exposing a reliable signal to external applications.
+
+KWin scripts run **inside the compositor process** and have direct access to screen state changes. By writing a small KWin script, we can detect the exact moment the screen dims from inactivity and emit our own custom D-Bus signal that the Python service can subscribe to.
+
+**This gives us:**
+- A true event-driven trigger (no polling)
+- Fires only on inactivity-based dimming (not lid close or sleep button)
+- Works reliably on both X11 and Wayland KDE sessions
+
+#### Step 5.1: KWin Script Metadata
+**File:** `kwin-scripts/sleep-checker-idle/metadata.json`
+
+**Purpose:** Defines the KWin script package identity and version.
+
+**What it contains:**
+- Script ID (unique identifier for KWin)
+- Display name and description
+- KWin scripting API version
+- Author and version info
+
+#### Step 5.2: KWin Script Main Logic
+**File:** `kwin-scripts/sleep-checker-idle/contents/code/main.js`
+
+**Purpose:** The actual KWin script that detects screen dim events and emits a custom D-Bus signal.
+
+**What it does:**
+1. Hooks into KWin's screen/compositor idle dim event
+2. When screen dims due to inactivity, calls `callDBus()` to emit a signal
+3. Emits on the custom D-Bus service `org.sleepchecker.IdleNotifier`
+4. Signal name: `ScreenDimmed` with a boolean payload (true = dimmed, false = restored)
+5. Also detects when screen brightness is restored (user returned)
+
+**Custom D-Bus Signal Details:**
+- **Service:** `org.sleepchecker.IdleNotifier`
+- **Object Path:** `/org/sleepchecker/IdleNotifier`
+- **Interface:** `org.sleepchecker.IdleNotifier`
+- **Signal:** `ScreenDimmed(boolean is_dimmed)`
+  - `true` → Screen just dimmed due to inactivity
+  - `false` → Screen restored (user activity detected)
+
+**KWin API used:**
+- `callDBus(service, path, interface, method, ...)` - Emit D-Bus signal from inside KWin
+- Compositor idle/dim hooks available through KWin's scripting workspace API
+
+#### Step 5.3: KWin Script Installation
+**File:** `scripts/install_kwin_script.sh`
+
+**Purpose:** Installs and enables the KWin script.
+
+**What it does:**
+1. Copies the script package to `~/.local/share/kwin/scripts/sleep-checker-idle/`
+2. Registers the script with KWin using `kwriteconfig6`
+3. Enables the script in KWin's configuration
+4. Reloads KWin scripts using `dbus-send` to `org.kde.KWin` so the script takes effect without logout
+
+**Usage:**
+```bash
+chmod +x scripts/install_kwin_script.sh
+./scripts/install_kwin_script.sh
+```
+
+**Verification:**
+```bash
+# Check if script is installed
+ls ~/.local/share/kwin/scripts/sleep-checker-idle/
+
+# Check if script is enabled in KWin config
+kreadconfig6 --file kwinrc --group Plugins --key sleep-checker-idleEnabled
+
+# Monitor the custom D-Bus signal
+dbus-monitor --session "type='signal',interface='org.sleepchecker.IdleNotifier'"
+# Then let screen dim naturally - should see ScreenDimmed signal appear
+```
+
+#### Step 5.4: KWin Script Uninstallation
+**File:** `scripts/uninstall_kwin_script.sh`
+
+**Purpose:** Removes and disables the KWin script.
+
+**What it does:**
+1. Disables the script in KWin configuration
+2. Removes the script directory from `~/.local/share/kwin/scripts/`
+3. Reloads KWin scripts
+
+---
+
+### Phase 6: Monitor Modules
+
+#### Step 6.1: Idle Monitor
 **File:** `src/monitors/idle_monitor.py`
 
-**Purpose:** Listens to KDE idle state changes via D-Bus.
+**Purpose:** Listens to the custom KWin D-Bus signal for screen dim events.
 
 **Key class:** `IdleMonitor`
 
 **Key methods:**
-- `__init__(callback)` - Sets up D-Bus listener
-- `start()` - Begins monitoring idle events
-- `on_idle_changed(is_idle)` - Callback when idle state changes
+- `__init__(callback)` - Sets up D-Bus listener for custom signal
+- `start()` - Subscribes to `org.sleepchecker.IdleNotifier.ScreenDimmed` signal
+- `stop()` - Disconnects from D-Bus
+- `run_forever()` - Main event loop
 
 **How it works:**
-1. Connects to **session D-Bus** (user-specific bus, not system bus)
-2. Subscribes to `org.freedesktop.ScreenSaver` interface
-3. Listens for `ActiveChanged` signal
-4. When idle threshold reached → triggers face detection
-5. Signal carries boolean: `True` = idle, `False` = active
+1. Connects to **session D-Bus**
+2. Adds a message handler that filters for `ScreenDimmed` signal on `org.sleepchecker.IdleNotifier`
+3. When signal received with `true` → triggers face detection callback
+4. When signal received with `false` → notifies that user is active
+5. Purely event-driven - zero polling, zero CPU when idle
 
 **D-Bus Details:**
-- **Service Name:** `org.freedesktop.ScreenSaver`
-- **Object Path:** `/org/freedesktop/ScreenSaver` or `/ScreenSaver`
-- **Interface:** `org.freedesktop.ScreenSaver`
-- **Signal:** `ActiveChanged(boolean is_idle)`
-- **Connection Type:** Session bus (not system bus)
+- **Service Name:** `org.sleepchecker.IdleNotifier`
+- **Object Path:** `/org/sleepchecker/IdleNotifier`
+- **Interface:** `org.sleepchecker.IdleNotifier`
+- **Signal:** `ScreenDimmed(boolean is_dimmed)`
+- **Connection Type:** Session bus
 
-**KDE Integration:**
-KDE's Power Management service emits this signal based on:
-- Mouse/keyboard inactivity timeout (configured in System Settings)
-- No video playback or audio
-- No application holding inhibitor lock
+**Signal Source:**
+The signal originates from the KWin script (`kwin-scripts/sleep-checker-idle/`) which runs inside KDE's compositor. It fires only when:
+- ✓ Screen dims due to keyboard/mouse inactivity
+- ✗ NOT when lid is closed
+- ✗ NOT when sleep button is pressed
+- ✗ NOT when user manually adjusts brightness
 
-**Testing D-Bus Connection:**
+**Testing the Signal:**
 ```bash
-# Monitor the signal in real-time
-dbus-monitor --session "type='signal',interface='org.freedesktop.ScreenSaver'"
+# Monitor the custom signal
+dbus-monitor --session "type='signal',interface='org.sleepchecker.IdleNotifier'"
 
-# Check if ScreenSaver service is available
-dbus-send --session --print-reply \
-  --dest=org.freedesktop.ScreenSaver \
-  /org/freedesktop/ScreenSaver \
-  org.freedesktop.DBus.Introspectable.Introspect
+# Let screen dim naturally due to inactivity
+# Should see: ScreenDimmed(true)
+# Move mouse
+# Should see: ScreenDimmed(false)
 ```
 
-#### Step 5.2: Sleep Monitor (Alternative)
+#### Step 6.2: Sleep Monitor (Alternative)
 **File:** `src/monitors/sleep_monitor.py`
 
-**Purpose:** Intercepts system sleep events (older approach).
+**Purpose:** Intercepts system sleep events (older approach, fallback).
 
 **Key class:** `SleepMonitor`
 
@@ -507,9 +635,9 @@ dbus-send --session --print-reply \
 
 ---
 
-### Phase 6: Main Daemon
+### Phase 7: Main Daemon
 
-#### Step 6.1: Main Service
+#### Step 7.1: Main Service
 **File:** `src/daemon/main_service.py`
 
 **Purpose:** Main entry point that orchestrates all components.
@@ -519,26 +647,28 @@ dbus-send --session --print-reply \
 **Key methods:**
 - `__init__()` - Initializes all components
 - `run()` - Main event loop
-- `handle_idle_event()` - Called when system goes idle
+- `handle_idle_event(is_dimmed)` - Called when KWin script emits dim signal
 - `check_user_presence()` - Captures webcam, runs detection/recognition
 - `take_action(result)` - Takes appropriate action based on detection
 
 **Flow:**
 1. Loads configuration
 2. Initializes face detector, recognizer, system controller
-3. Starts idle monitor
-4. When idle event received:
+3. Starts idle monitor (subscribes to custom D-Bus signal)
+4. When `ScreenDimmed(true)` signal received from KWin script:
    - Captures webcam frame
    - Detects faces
    - If face found, recognizes it
    - Takes action (inhibit/allow/shutdown)
-5. Logs all actions
+5. When `ScreenDimmed(false)` signal received:
+   - Releases any active inhibitors
+6. Logs all actions
 
 ---
 
-### Phase 7: Example Scripts (Learning Path)
+### Phase 8: Example Scripts (Learning Path)
 
-#### Step 7.1: Webcam Test
+#### Step 8.1: Webcam Test
 **File:** `examples/step1_webcam_test.py`
 
 **Purpose:** Verify webcam is accessible and working.
@@ -554,7 +684,7 @@ dbus-send --session --print-reply \
 python examples/step1_webcam_test.py
 ```
 
-#### Step 7.2: Basic Face Detection
+#### Step 8.2: Basic Face Detection
 **File:** `examples/step2_basic_face_detection.py`
 
 **Purpose:** Test YuNet face detection on webcam feed.
@@ -565,7 +695,7 @@ python examples/step1_webcam_test.py
 - Draws bounding boxes
 - Shows confidence scores
 
-#### Step 7.3: Capture Training Data
+#### Step 8.3: Capture Training Data
 **File:** `examples/step3_capture_training_data.py`
 
 **Purpose:** Capture your face photos for training.
@@ -583,29 +713,29 @@ python examples/step1_webcam_test.py
 4. Capture 20-30 photos
 5. Press Q to quit
 
-#### Step 7.4: Train Face Model
+#### Step 8.4: Train Face Model
 **File:** `examples/step4_train_face_model.py`
 
-**Purpose:** Generate face encodings from captured photos.
+**Purpose:** Train OpenCV LBPH face recognizer from captured photos.
 
 **What it does:**
 - Loads images from `data/known_faces/owner/`
-- Detects face in each image
-- Generates face encoding
+- Detects face in each image using YuNet
+- Trains LBPH recognizer with cropped faces
 - Saves to `models/face_encodings.pkl`
 
-#### Step 7.5: Test Recognition
+#### Step 8.5: Test Recognition
 **File:** `examples/step5_test_recognition.py`
 
 **Purpose:** Test face recognition in real-time.
 
 **What it does:**
-- Loads trained encodings
+- Loads trained LBPH model
 - Opens webcam
 - Recognizes your face
 - Shows "OWNER" or "UNKNOWN"
 
-#### Step 7.6: Test System Inhibitor
+#### Step 8.6: Test System Inhibitor
 **File:** `examples/step6_test_system_inhibitor.py`
 
 **Purpose:** Test preventing screen dim/lock.
@@ -616,55 +746,55 @@ python examples/step1_webcam_test.py
 - Releases lock
 - Verify screen doesn't dim
 
-#### Step 7.7: Test Idle Detection
+#### Step 8.7: Test Idle Detection
 **File:** `examples/step7_test_idle_detection.py`
 
-**Purpose:** Test KDE idle event detection via D-Bus.
+**Purpose:** Test custom KWin D-Bus signal detection.
 
 **What it does:**
-- Connects to D-Bus ScreenSaver
-- Listens for idle events
-- Prints when idle/active
-- Verify timeout matches KDE settings
+- Connects to D-Bus session bus
+- Subscribes to `org.sleepchecker.IdleNotifier.ScreenDimmed` signal
+- Prints when screen dims (signal: true) and restores (signal: false)
+- Verify signal fires when idle timeout is reached
+
+**Prerequisites:**
+- KWin script must be installed (`scripts/install_kwin_script.sh`)
+- KDE idle timeout must be configured in System Settings → Power Management
 
 **D-Bus Testing Commands:**
 ```bash
-# Check if ScreenSaver service exists
-qdbus org.freedesktop.ScreenSaver /ScreenSaver
+# Check if KWin script is loaded
+qdbus org.kde.KWin /Scripting
 
-# Or using busctl
-busctl --user tree org.freedesktop.ScreenSaver
+# Monitor the custom signal
+dbus-monitor --session "type='signal',interface='org.sleepchecker.IdleNotifier'"
 
-# Monitor signals in real-time
-dbus-monitor --session "type='signal',interface='org.freedesktop.ScreenSaver'"
-
-# Manually trigger idle (some systems)
-qdbus org.freedesktop.ScreenSaver /ScreenSaver SetActive true
+# Let screen dim from inactivity to test
 ```
 
-#### Step 7.8: Full Integration Test
+#### Step 8.8: Full Integration Test
 **File:** `examples/step8_full_integration.py`
 
 **Purpose:** Test complete system before installing as service.
 
 **What it does:**
 - Combines all components
-- Monitors idle
-- Runs face detection/recognition
+- Monitors custom D-Bus signal from KWin script
+- Runs face detection/recognition on dim event
 - Takes actions
 - Logs everything
 
 **Run for 10-15 minutes and verify:**
-- Idle detection works
+- KWin script fires signal when screen dims
 - Face recognition accurate
 - Inhibitor prevents screen dim
 - Logs are clear
 
 ---
 
-### Phase 8: Systemd Service Installation
+### Phase 9: Systemd Service Installation
 
-#### Step 8.1: Create Service Unit File
+#### Step 9.1: Create Service Unit File
 **File:** `service/sleep-checker.service`
 
 **Purpose:** Defines systemd user service.
@@ -694,7 +824,7 @@ WantedBy=default.target
 - **Environment**: Needed for GUI and D-Bus access
 - **WantedBy=default.target**: Starts on login
 
-#### Step 8.2: Create Install Script
+#### Step 9.2: Create Install Script
 **File:** `scripts/install_service.sh`
 
 **Purpose:** Automates service installation.
@@ -712,7 +842,7 @@ chmod +x scripts/install_service.sh
 ./scripts/install_service.sh
 ```
 
-#### Step 8.3: Create Uninstall Script
+#### Step 9.3: Create Uninstall Script
 **File:** `scripts/uninstall_service.sh`
 
 **Purpose:** Removes the service.
@@ -725,9 +855,9 @@ chmod +x scripts/install_service.sh
 
 ---
 
-### Phase 9: Testing and Verification
+### Phase 10: Testing and Verification
 
-#### Step 9.1: Check Service Status
+#### Step 10.1: Check Service Status
 ```bash
 systemctl --user status sleep-checker.service
 ```
@@ -737,7 +867,7 @@ Should show:
 - Process ID
 - Recent log entries
 
-#### Step 9.2: View Logs
+#### Step 10.2: View Logs
 ```bash
 # Journal logs
 journalctl --user -u sleep-checker.service -f
@@ -746,17 +876,18 @@ journalctl --user -u sleep-checker.service -f
 tail -f data/logs/sleep_checker.log
 ```
 
-#### Step 9.3: Test Scenarios
+#### Step 10.3: Test Scenarios
 
 **Test 1: Normal Operation**
-1. Let system sit idle for 5 minutes
-2. Watch logs - should trigger face detection
-3. If you're present, screen shouldn't dim
-4. Move away, screen should dim/lock
+1. Let system sit idle for configured timeout
+2. KWin script fires `ScreenDimmed(true)` signal
+3. Watch logs - should trigger face detection
+4. If you're present, screen shouldn't dim
+5. Move away, screen should dim/lock
 
 **Test 2: Unknown Person**
 1. Have someone else sit in front of camera
-2. Wait for idle timeout
+2. Wait for idle timeout and dim signal
 3. System should shutdown (test carefully!)
 
 **Test 3: No Camera Access**
@@ -764,7 +895,14 @@ tail -f data/logs/sleep_checker.log
 2. System should log error but not crash
 3. Should fall back to allowing normal sleep
 
-#### Step 9.4: Performance Monitoring
+**Test 4: KWin Script Verification**
+1. Monitor custom D-Bus signal in one terminal
+2. Let screen dim from inactivity
+3. Verify signal fires with `true` payload
+4. Move mouse, verify signal fires with `false` payload
+5. Close laptop lid - verify signal does NOT fire
+
+#### Step 10.4: Performance Monitoring
 ```bash
 # CPU usage
 top -p $(pgrep -f main_service.py)
@@ -774,19 +912,19 @@ ps aux | grep main_service.py
 ```
 
 Should use:
-- CPU: <5% when idle, <20% during face detection
+- CPU: <1% when waiting for signal, <20% during face detection
 - Memory: <200MB
 
 ---
 
-### Phase 10: Configuration and Tuning
+### Phase 11: Configuration and Tuning
 
-#### Step 10.1: Adjust Detection Threshold
+#### Step 11.1: Adjust Detection Threshold
 Edit `config/user_config.json`:
 ```json
 {
   "detection": {
-    "score_threshold": 0.4  // Lower = more sensitive (more false positives)
+    "score_threshold": 0.4
   }
 }
 ```
@@ -796,43 +934,43 @@ Restart service:
 systemctl --user restart sleep-checker.service
 ```
 
-#### Step 10.2: Adjust Recognition Threshold
+#### Step 11.2: Adjust Recognition Threshold
 ```json
 {
   "detection": {
-    "recognition_threshold": 0.5  // Lower = more strict matching
+    "recognition_threshold": 40.0
   }
 }
 ```
 
-#### Step 10.3: Change Idle Timeout
+Lower value = more strict matching (fewer false positives, more false negatives).
+
+#### Step 11.3: Change Idle Timeout
 **Note:** This is controlled by KDE, not the service.
 
 **Set in KDE System Settings:**
 1. System Settings → Power Management → Energy Saving
 2. Set "Dim screen" timeout (e.g., 5 minutes)
-3. Service will trigger when KDE sends D-Bus signal at this timeout
+3. The KWin script will fire the custom D-Bus signal when this timeout is reached
 
-**Verify KDE Idle Settings:**
-```bash
-# Check current idle timeout (in milliseconds)
-kwriteconfig5 --file powermanagementprofilesrc --group AC --group DimDisplay --key idleTime
-
-# Or check with qdbus
-qdbus org.kde.Solid.PowerManagement \
-  /org/kde/Solid/PowerManagement \
-  org.kde.Solid.PowerManagement.idleTime
+**KDE → KWin Script → D-Bus → Service Flow:**
+```
+KDE Idle Timer (5 min)
+    ↓
+KWin compositor dims screen
+    ↓
+KWin script detects dim event
+    ↓
+callDBus() → org.sleepchecker.IdleNotifier.ScreenDimmed(true)
+    ↓
+IdleMonitor receives signal
+    ↓
+Webcam capture → Face detection → Recognition
+    ↓
+Owner found → Inhibit(keep active)  |  No face → Allow sleep  |  Unknown → Shutdown
 ```
 
-**KDE → D-Bus → Service Flow:**
-```
-KDE Timer (5 min) → D-Bus Signal → IdleMonitor → Face Check → Inhibit
-     ↓                    ↓              ↓             ↓           ↓
-  Inactivity      ActiveChanged(true)  Webcam    Recognition   D-Bus
-  Detected         on Session Bus      Capture    Process      Inhibit()
-```
-
-#### Step 10.4: Retrain Face Model
+#### Step 11.4: Retrain Face Model
 If recognition accuracy is poor:
 ```bash
 # Capture more photos (different lighting, angles)
@@ -856,13 +994,13 @@ systemctl --user restart sleep-checker.service
 
 ### Core Modules (`src/core/`)
 - **face_detector.py**: YuNet-based face detection
-- **face_recognizer.py**: dlib-based face recognition
-- **face_trainer.py**: Generates face encodings from photos
+- **face_recognizer.py**: OpenCV LBPH face recognition
+- **face_trainer.py**: Trains face model from captured photos
 - **system_controller.py**: D-Bus interface for system inhibition
 
 ### Monitor Modules (`src/monitors/`)
-- **idle_monitor.py**: KDE idle event detection via D-Bus
-- **sleep_monitor.py**: Alternative sleep event interception
+- **idle_monitor.py**: Subscribes to custom KWin D-Bus signal for idle dim detection
+- **sleep_monitor.py**: Alternative sleep event interception (fallback)
 
 ### Utility Modules (`src/utils/`)
 - **config_manager.py**: Configuration loading and merging
@@ -872,11 +1010,17 @@ systemctl --user restart sleep-checker.service
 ### Daemon (`src/daemon/`)
 - **main_service.py**: Main orchestration and event loop
 
+### KWin Scripts (`kwin-scripts/`)
+- **sleep-checker-idle/metadata.json**: KWin script package metadata
+- **sleep-checker-idle/contents/code/main.js**: KWin script that detects screen dim and emits custom D-Bus signal
+
 ### Examples (`examples/`)
 - **step1-8**: Progressive learning scripts to understand each component
 
 ### Scripts (`scripts/`)
 - **download_model.sh**: Download YuNet model
+- **install_kwin_script.sh**: Install KWin idle dim detection script
+- **uninstall_kwin_script.sh**: Remove KWin script
 - **install_service.sh**: Install systemd service
 - **uninstall_service.sh**: Remove systemd service
 - **capture_faces.sh**: Quick face capture helper
@@ -896,10 +1040,18 @@ systemctl --user restart sleep-checker.service
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      KDE Desktop Environment                 │
-│  (Power Management → Idle Timer → D-Bus Signal)             │
+│  (Power Management → Idle Timer → Screen Dim)               │
 └───────────────────────────┬─────────────────────────────────┘
                             │
-                            │ ActiveChanged(true)
+                            │ KWin compositor dims screen
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                KWin Script (sleep-checker-idle)              │
+│  Detects dim event → callDBus() →                           │
+│  org.sleepchecker.IdleNotifier.ScreenDimmed(true)           │
+└───────────────────────────┬─────────────────────────────────┘
+                            │
+                            │ Custom D-Bus signal (Session Bus)
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                    Sleep Checker Service                     │
@@ -907,14 +1059,14 @@ systemctl --user restart sleep-checker.service
 │                                                               │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
 │  │ IdleMonitor  │  │ FaceDetector │  │ System       │      │
-│  │ (D-Bus)      │→ │ (YuNet)      │→ │ Controller   │      │
+│  │ (D-Bus sub)  │→ │ (YuNet)      │→ │ Controller   │      │
 │  └──────────────┘  └──────────────┘  └──────────────┘      │
 │         │                   │                   │            │
 │         │                   ↓                   │            │
 │         │          ┌──────────────┐            │            │
 │         │          │ Face         │            │            │
 │         │          │ Recognizer   │            │            │
-│         │          │ (dlib)       │            │            │
+│         │          │ (LBPH)       │            │            │
 │         │          └──────────────┘            │            │
 │         │                   │                   │            │
 │         └───────────────────┴───────────────────┘            │
@@ -939,6 +1091,64 @@ systemctl --user restart sleep-checker.service
 
 ## Troubleshooting
 
+### KWin Script Issues
+
+**Problem:** KWin script not installed
+```bash
+# Check if script directory exists
+ls ~/.local/share/kwin/scripts/sleep-checker-idle/
+
+# Reinstall
+./scripts/install_kwin_script.sh
+```
+
+**Problem:** KWin script installed but not enabled
+```bash
+# Check enabled state
+kreadconfig6 --file kwinrc --group Plugins --key sleep-checker-idleEnabled
+
+# Enable manually
+kwriteconfig6 --file kwinrc --group Plugins --key sleep-checker-idleEnabled true
+
+# Reload KWin scripts
+dbus-send --session --type=method_call \
+  --dest=org.kde.KWin /Scripting org.kde.kwin.Scripting.start
+```
+
+**Problem:** KWin script not firing signal
+```bash
+# Monitor the custom signal
+dbus-monitor --session "type='signal',interface='org.sleepchecker.IdleNotifier'"
+
+# Check KWin script console for errors
+journalctl --user -u plasma-kwin_wayland.service -f
+# or for X11:
+journalctl --user -u plasma-kwin_x11.service -f
+```
+
+**Problem:** KWin script fires but Python doesn't receive
+```bash
+# Verify Python can see the signal
+python3 -c "
+import asyncio
+from dbus_next.aio import MessageBus
+from dbus_next import BusType, MessageType
+
+async def test():
+    bus = await MessageBus(bus_type=BusType.SESSION).connect()
+    def handler(msg):
+        if msg.message_type == MessageType.SIGNAL:
+            print(f'Signal: {msg.interface}.{msg.member} = {msg.body}')
+        return True
+    bus.add_message_handler(handler)
+    print('Listening for signals... let screen dim')
+    while True:
+        await asyncio.sleep(1)
+
+asyncio.run(test())
+"
+```
+
 ### Service won't start
 ```bash
 # Check logs
@@ -949,6 +1159,7 @@ journalctl --user -u sleep-checker.service -n 50
 # - Camera busy: Close other apps using webcam
 # - Missing model: Run download_model.sh
 # - D-Bus not accessible: Check DBUS_SESSION_BUS_ADDRESS
+# - KWin script not installed: Run install_kwin_script.sh
 ```
 
 ### D-Bus Connection Issues
@@ -958,10 +1169,6 @@ journalctl --user -u sleep-checker.service -n 50
 # Verify D-Bus session is running
 echo $DBUS_SESSION_BUS_ADDRESS
 # Should show: unix:path=/run/user/1000/bus (or similar)
-
-# Check if ScreenSaver service is available
-qdbus --session org.freedesktop.ScreenSaver
-# Should list available methods
 
 # Test D-Bus from Python
 python3 -c "from dbus_next.aio import MessageBus; import asyncio; asyncio.run(MessageBus().connect())"
@@ -973,24 +1180,12 @@ python3 -c "from dbus_next.aio import MessageBus; import asyncio; asyncio.run(Me
 Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus"
 ```
 
-**Problem:** Idle signal not received
-```bash
-# Monitor D-Bus for signals
-dbus-monitor --session "type='signal',interface='org.freedesktop.ScreenSaver'"
-# Wait for idle timeout, should see ActiveChanged signal
-
-# Check KDE idle settings
-systemsettings5  # Navigate to Power Management
-```
-
 **Problem:** Inhibitor not working
 ```bash
 # Check if inhibitor is registered
 busctl --user call org.freedesktop.PowerManagement.Inhibit \
   /org/freedesktop/PowerManagement/Inhibit \
-  org.freedesktop.PowerManagement.Inhibit ListInhibitors
-
-# Should show sleep-checker with "User present" reason
+  org.freedesktop.PowerManagement.Inhibit HasInhibit
 
 # Manually test inhibitor
 dbus-send --session --print-reply \
@@ -998,7 +1193,6 @@ dbus-send --session --print-reply \
   /org/freedesktop/PowerManagement/Inhibit \
   org.freedesktop.PowerManagement.Inhibit.Inhibit \
   string:"Test" string:"Testing inhibitor"
-# Returns cookie number - screen shouldn't dim now
 ```
 
 ### Face not recognized
@@ -1014,19 +1208,10 @@ systemctl --user restart sleep-checker.service
 # Check if inhibitor is active
 busctl --user call org.freedesktop.PowerManagement.Inhibit \
   /org/freedesktop/PowerManagement/Inhibit \
-  org.freedesktop.PowerManagement.Inhibit ListInhibitors
+  org.freedesktop.PowerManagement.Inhibit HasInhibit
 
-# Should show sleep-checker with reason "User present"
-```
-
-### High CPU usage
-```bash
-# Adjust check interval in config
-{
-  "idle": {
-    "check_interval": 10  // Increase to reduce CPU
-  }
-}
+# Check if KWin signal was received in logs
+tail -20 data/logs/sleep_checker.log
 ```
 
 ---
@@ -1034,19 +1219,24 @@ busctl --user call org.freedesktop.PowerManagement.Inhibit \
 ## Next Steps
 
 1. **Complete Phase 0-2**: Setup project and download models
-2. **Run examples sequentially**: Understand each component
-3. **Capture and train**: Get good training data
-4. **Test integration**: Run step8 before installing service
-5. **Install service**: Use install script
-6. **Monitor and tune**: Adjust thresholds based on accuracy
+2. **Phase 3-4**: Build utility and core modules
+3. **Phase 5**: Create and install KWin script for idle dim detection
+4. **Phase 6**: Build idle monitor that subscribes to custom signal
+5. **Run examples sequentially**: Understand each component
+6. **Capture and train**: Get good training data
+7. **Test integration**: Run step8 before installing service
+8. **Install service**: Use install script
+9. **Monitor and tune**: Adjust thresholds based on accuracy
 
 ---
 
 ## Additional Resources
 
 - **OpenCV YuNet**: https://github.com/opencv/opencv_zoo/tree/master/models/face_detection_yunet
-- **face_recognition library**: https://github.com/ageitgey/face_recognition
-- **D-Bus Python**: https://python-dbus-next.readthedocs.io/
+- **OpenCV Face Recognition (LBPH)**: https://docs.opencv.org/4.x/da/d60/tutorial_face_main.html
+- **KWin Scripting**: https://develop.kde.org/docs/plasma/kwin/api/
+- **KWin callDBus**: https://develop.kde.org/docs/plasma/kwin/api/#callDBus
+- **D-Bus Python (dbus-next)**: https://python-dbus-next.readthedocs.io/
 - **systemd user services**: https://wiki.archlinux.org/title/Systemd/User
 
 ---
