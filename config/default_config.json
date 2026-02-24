@@ -1,0 +1,37 @@
+{
+    "camera":{
+        "device_index": 0,
+        "width": 640,
+        "height": 480,
+        "warmup_time": 0.5
+    },
+    "detection": {
+        "score_threshold": 0.5,
+        "nms_threshold": 0.3,
+        "top_k": 5000
+    },
+    "recognition": {
+        "tolerance": 0.6,
+        "model": "large"
+    },
+    "idle": {
+        "check_interval": 5,
+        "kde_idle_timeout": 300
+    },
+    "actions": {
+        "unknown_person_action": "shutdown",
+        "inhibit_on_owner": true,
+        "no_face_behavior": "allow_sleep"
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "data/logs/sleep_checker.log",
+        "max_bytes": 10485760,
+        "backup_count": 3
+    },
+    "paths": {
+        "model_path": "models/yunet.onnx",
+        "encodings_path": "models/face_encodings.pkl",
+        "training_data_dir": "data/known_faces"
+    }       
+}

@@ -1,0 +1,11 @@
+Problem statement:
+whenever im trying to study or write something infront of the screen, after some inactivity the pc automatically turns to sleep mode after going dim. 
+
+Proposed concept:
+Create something that will detect if anyone is infornt of the laptop, check if it the user and implement the following:
+    Case1: user is recognized, keeps the pc active, doesn't do dim, or dark , or sleep
+    Case2: face not detected, doesn't do anything the pc goes to sleep normally
+    Case3: Someone else other than user detected, shuts down the pc 
+
+Implementation:
+i want to create a user service, that will trigger an inhibitor (lock) by receving an idle event from the kde environement, 

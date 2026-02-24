@@ -1,0 +1,14 @@
+{
+    "detection": {
+        "score_threshold": 0.4
+    },
+    "recognition": {
+        "tolerance": 0.5
+    },
+    "actions": {
+        "unknown_person_action": "lock"
+    },
+    "logging": {
+        "level": "DEBUG"
+    }
+}
