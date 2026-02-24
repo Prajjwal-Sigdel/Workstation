@@ -1,9 +1,0 @@
-# Generated encoding files (can be regenerated from known_faces)
-*.pkl
-*.pickle
-
-# Temporary data files
-*.tmp
-*.temp
-
-# Keep the directory but ignore the generated files
