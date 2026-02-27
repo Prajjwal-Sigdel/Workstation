@@ -1,0 +1,15 @@
+{
+    "KPlugin": {
+        "Id": "sleep-checker-idle",
+        "Name": "Sleep Checker Idle Detection",
+        "Description": "Emits a custom D-Bus signal when screen dims due to inactivity",
+        "Version": "1.0",
+        "Authors": [
+            {
+                "Name": "Prajjwal"
+            }
+        ]
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
+}
